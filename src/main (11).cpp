@@ -9,6 +9,13 @@
   Кінцевий вимикач -> GPIO4 (PIN_LIMIT_SWITCH) - положення механізму.
   Реле 1 (двигун)              -> GPIO32 (PIN_RELAY_1_MOTOR)
   Реле 2 (розподіл навантаження) -> GPIO27 (PIN_RELAY_2_LOAD)
+  Реле 3 (гальмо)              -> GPIO26 (PIN_RELAY_3_BRAKE)
+
+  Гальмо: НормальноВідкритий (NO) контакт реле 3 замкнутий на GND.
+  Коли котушка знеструмлена - контакт розімкнутий, гальмо відпущене.
+  Тобто при втраті живлення (зникло 12В чи зникло живлення самого
+  реле-модуля) гальмо ВІДПУСКАЄТЬСЯ автоматично, апаратно - це навмисний
+  fail-safe.
 
   Блок реле живиться ОКРЕМО: 5В через DC-DC понижувач, який бере 12В
   тієї самої зовнішньої мережі. GND реле-модуля - спільний з ESP32,
@@ -29,6 +36,11 @@
     УВІМКНЕНО, коли є напруга 12В.
     ВИМКНЕНО, коли напруги немає.
 
+  Реле 3 (гальмо):
+    УВІМКНЕНО (з невеликою затримкою BRAKE_ENGAGE_DELAY_MS), коли є
+    напруга 12В І кінцевик ЗАМКНУТИЙ (вантаж доїхав до верхньої точки).
+    В усіх інших випадках - ВИМКНЕНО, одразу, без затримки.
+
   ================================================================
 */
 
@@ -39,14 +51,28 @@ const int PIN_OPTOCOUPLER   = 33;   // Оптопара - детектор на�
 const int PIN_LIMIT_SWITCH  = 4;    // Кінцевий вимикач (LOW = замкнутий)
 const int PIN_RELAY_1_MOTOR = 32;   // Реле 1 - керування двигуном
 const int PIN_RELAY_2_LOAD  = 27;   // Реле 2 - керування розподілом навантаження
+const int PIN_RELAY_3_BRAKE = 26;   // Реле 3 - гальмо (замикає "+" мотора на GND)
+                                     // ⚠️ GPIO26 ще не перевірений фізичним тестом
+                                     // клацання на цій платі - зроби це перед
+                                     // використанням з реальним двигуном.
 
 // Рівень на GPIO, який УВІМКНЕНОЇ котушку реле (COM з'єднано з NO).
 // HIGH - звичайний модуль; LOW - модуль з інверсною логікою ("low level trigger").
-// Обидва канали на цій платі мають інверсну логіку -> активний рівень LOW.
+// Реле 1 і 2 на цій платі мають інверсну логіку -> активний рівень LOW.
 // (Реле 2 працювало навпаки; реле 1 на старті їхало ~0.5с, поки код
 // підтверджував напругу 12В, бо "вимкнено" = LOW насправді вмикало котушку.)
+// Реле 3 - той самий модуль/тип каналу, тому теж поставлено LOW за
+// замовчуванням, але це ще НЕ перевірено окремо - перевір при першому
+// ввімкненні (якщо гальмо тримається завжди увімкненим чи завжди
+// вимкненим незалежно від умов - постав тут HIGH).
 const int RELAY_1_ON_LEVEL = LOW;
 const int RELAY_2_ON_LEVEL = LOW;
+const int RELAY_3_ON_LEVEL = LOW;
+
+// Невелика затримка перед тим, як гальмо реально увімкнеться (від моменту,
+// коли обидві умови - є напруга і кінцевик замкнутий - стали істинними).
+// Вимикається завжди одразу, без затримки.
+const unsigned long BRAKE_ENGAGE_DELAY_MS = 300;
 
 // ------------------- ОПТОПАРА: ЦИФРОВЕ ЗЧИТУВАННЯ -------------------
 // ⚠️ НА GPIO33 НІКОЛИ НЕ ВИКЛИКАТИ analogRead/analogReadMilliVolts!
@@ -72,6 +98,7 @@ const unsigned long LIMIT_CONFIRM_MS = 50;
 const unsigned long RELAY_MIN_SWITCH_INTERVAL = 300;
 unsigned long lastRelay1SwitchTime = 0;
 unsigned long lastRelay2SwitchTime = 0;
+unsigned long lastRelay3SwitchTime = 0;
 
 // ------------------- ТАЙМІНГ ДІАГНОСТИЧНОГО ВИВОДУ -------------------
 unsigned long lastPrintTime = 0;
@@ -146,8 +173,10 @@ void setup() {
   // Рівень "вимкнено" - протилежний активному для кожного реле.
   digitalWrite(PIN_RELAY_1_MOTOR, RELAY_1_ON_LEVEL == HIGH ? LOW : HIGH);
   digitalWrite(PIN_RELAY_2_LOAD,  RELAY_2_ON_LEVEL == HIGH ? LOW : HIGH);
+  digitalWrite(PIN_RELAY_3_BRAKE, RELAY_3_ON_LEVEL == HIGH ? LOW : HIGH);
   pinMode(PIN_RELAY_1_MOTOR, OUTPUT);
   pinMode(PIN_RELAY_2_LOAD, OUTPUT);
+  pinMode(PIN_RELAY_3_BRAKE, OUTPUT);
 
   Serial.begin(115200);
   delay(500);
@@ -199,6 +228,33 @@ void loop() {
       : ">> РЕЛЕ 2 (навантаження): ВИМКНЕНО");
   }
 
+  // ---- Реле 3 (гальмо): ON з невеликою затримкою, коли є напруга
+  //      І кінцевик ЗАМКНУТИЙ. OFF - завжди одразу, без затримки. ----
+  static bool relay3Was = false;
+  static bool brakeConditionWasTrue = false;
+  static unsigned long brakeConditionSince = 0;
+
+  bool brakeCondition = voltagePresent && !limitOpen;   // кінцевик замкнутий = !limitOpen
+
+  if (brakeCondition && !brakeConditionWasTrue) {
+    brakeConditionSince = currentTime;   // умова щойно стала істинною - почати відлік затримки
+  }
+  brakeConditionWasTrue = brakeCondition;
+
+  bool relay3ShouldBe = brakeCondition &&
+                         (currentTime - brakeConditionSince >= BRAKE_ENGAGE_DELAY_MS);
+
+  if (relay3ShouldBe != relay3Was &&
+      currentTime - lastRelay3SwitchTime >= RELAY_MIN_SWITCH_INTERVAL) {
+    lastRelay3SwitchTime = currentTime;
+    relay3Was = relay3ShouldBe;
+    digitalWrite(PIN_RELAY_3_BRAKE,
+                 relay3ShouldBe ? RELAY_3_ON_LEVEL : (RELAY_3_ON_LEVEL == HIGH ? LOW : HIGH));
+    Serial.println(relay3ShouldBe
+      ? ">> РЕЛЕ 3 (гальмо): УВІМКНЕНО"
+      : ">> РЕЛЕ 3 (гальмо): ВИМКНЕНО");
+  }
+
   // ---- Діагностичний вивід раз на секунду ----
   if (currentTime - lastPrintTime >= PRINT_INTERVAL) {
     lastPrintTime = currentTime;
@@ -212,6 +268,8 @@ void loop() {
     Serial.print("  Реле1: ");
     Serial.print(relay1Was ? "1" : "0");
     Serial.print("  Реле2: ");
-    Serial.println(relay2Was ? "1" : "0");
+    Serial.print(relay2Was ? "1" : "0");
+    Serial.print("  Реле3(гальмо): ");
+    Serial.println(relay3Was ? "1" : "0");
   }
 }
