@@ -132,6 +132,25 @@ bool isLimitOpen();
 int16_t ina3221ReadRegister(uint8_t reg);
 float ina3221GetShuntVoltage_mV(uint8_t channel);
 float ina3221GetCurrent_mA(uint8_t channel);
+void i2cReinit();
+
+
+// ================================================================
+// ФУНКЦІЯ: i2cReinit()
+// Призначення: повний перезапуск I2C-шини (Wire.end() + Wire.begin()).
+//              Клацання реле - джерело електричного шуму, після якого
+//              внутрішній стан I2C-драйвера ESP32 іноді "заклякає" і
+//              починає повертати застарілі/биті байти, хоча формально
+//              читання "вдається" (2 байти отримано). Викликати одразу
+//              після кожного фізичного перемикання реле - скидає це,
+//              не чекаючи, поки воно саме собою "розсмокчеться".
+// ================================================================
+void i2cReinit() {
+  Wire.end();
+  delay(1);
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Wire.setClock(50000);
+}
 
 
 // ================================================================
@@ -275,6 +294,7 @@ void setup() {
   pinMode(PIN_OPTOCOUPLER, INPUT_PULLUP);  // GPIO33 підтримує внутрішній pull-up
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Wire.setClock(50000);   // знижена швидкість I2C - стійкість до шуму від щіток мотора/реле
 
   // Сканування шини I2C - показує, які адреси реально відповідають,
   // незалежно від того, яку адресу ми "здогадуємось" використати нижче.
@@ -321,6 +341,7 @@ void loop() {
     relay1Was = relay1ShouldBe;
     digitalWrite(PIN_RELAY_1_MOTOR,
                  relay1ShouldBe ? RELAY_1_ON_LEVEL : (RELAY_1_ON_LEVEL == HIGH ? LOW : HIGH));
+    i2cReinit();   // скинути можливе заклякання I2C від шуму клацання
     Serial.println(relay1ShouldBe
       ? ">> РЕЛЕ 1 (двигун): УВІМКНЕНО"
       : ">> РЕЛЕ 1 (двигун): ВИМКНЕНО");
@@ -336,6 +357,7 @@ void loop() {
     relay2Was = relay2ShouldBe;
     digitalWrite(PIN_RELAY_2_LOAD,
                  relay2ShouldBe ? RELAY_2_ON_LEVEL : (RELAY_2_ON_LEVEL == HIGH ? LOW : HIGH));
+    i2cReinit();   // скинути можливе заклякання I2C від шуму клацання
     Serial.println(relay2ShouldBe
       ? ">> РЕЛЕ 2 (навантаження): УВІМКНЕНО"
       : ">> РЕЛЕ 2 (навантаження): ВИМКНЕНО");
@@ -363,6 +385,7 @@ void loop() {
     relay3Was = relay3ShouldBe;
     digitalWrite(PIN_RELAY_3_BRAKE,
                  relay3ShouldBe ? RELAY_3_ON_LEVEL : (RELAY_3_ON_LEVEL == HIGH ? LOW : HIGH));
+    i2cReinit();   // скинути можливе заклякання I2C від шуму клацання
     Serial.println(relay3ShouldBe
       ? ">> РЕЛЕ 3 (гальмо): УВІМКНЕНО"
       : ">> РЕЛЕ 3 (гальмо): ВИМКНЕНО");
