@@ -255,10 +255,27 @@ void setup() {
   pinMode(PIN_OPTOCOUPLER, INPUT_PULLUP);  // GPIO33 підтримує внутрішній pull-up
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  ina3221ReadRegister(0x01);   // пробне зчитування - виставить ina3221Found
+
+  // Сканування шини I2C - показує, які адреси реально відповідають,
+  // незалежно від того, яку адресу ми "здогадуємось" використати нижче.
+  Serial.println("Сканування I2C...");
+  int foundCount = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("  Знайдено пристрій на адресі 0x");
+      Serial.println(addr, HEX);
+      foundCount++;
+    }
+  }
+  if (foundCount == 0) {
+    Serial.println("  Жодного пристрою не знайдено - перевір VCC/GND/SDA/SCL і підтяжки на шині.");
+  }
+
+  ina3221ReadRegister(0x01);   // пробне зчитування на заданій адресі - виставить ina3221Found
   Serial.println(ina3221Found
     ? "Датчик струму INA3221 відповідає на I2C."
-    : "УВАГА: датчик струму INA3221 не відповідає на I2C (адреса 0x40) - перевір підключення.");
+    : "УВАГА: датчик струму INA3221 не відповідає на адресі INA3221_ADDR - див. сканування вище.");
 
   Serial.println("Система готова.");
   Serial.println("---------------------------------------------");
