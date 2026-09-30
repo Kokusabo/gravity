@@ -142,21 +142,29 @@ int16_t ina3221ReadRegister(uint8_t reg) {
   // ⚠️ НЕ endTransmission(false) (repeated start) - на Arduino-ESP32 після
   // першого такого читання шина "залипає" і всі наступні падають з
   // i2cWriteReadNonStop Error -1. STOP між записом і читанням стабільний.
-  Wire.beginTransmission(INA3221_ADDR);
-  Wire.write(reg);
-  if (Wire.endTransmission(true) != 0) {
-    ina3221Found = false;
-    return 0;
+  //
+  // Одна спроба повтору: поодинокі збої (requestFrom не отримав 2 байти)
+  // трапляються в момент клацання реле - електричний шум від котушок на
+  // мить збиває I2C. Це не завжди вдається прибрати тільки програмно,
+  // але повтор одразу зазвичай проходить, бо викид короткий.
+  for (int attempt = 0; attempt < 2; attempt++) {
+    Wire.beginTransmission(INA3221_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(true) != 0) {
+      continue;
+    }
+    Wire.requestFrom((int)INA3221_ADDR, 2);
+    if (Wire.available() < 2) {
+      continue;
+    }
+    uint16_t hi = Wire.read();
+    uint16_t lo = Wire.read();
+    ina3221Found = true;
+    return (int16_t)((hi << 8) | lo);
   }
-  Wire.requestFrom((int)INA3221_ADDR, 2);
-  if (Wire.available() < 2) {
-    ina3221Found = false;
-    return 0;
-  }
-  uint16_t hi = Wire.read();
-  uint16_t lo = Wire.read();
-  ina3221Found = true;
-  return (int16_t)((hi << 8) | lo);
+
+  ina3221Found = false;
+  return 0;
 }
 
 
