@@ -139,9 +139,12 @@ float ina3221GetCurrent_mA(uint8_t channel);
 // Призначення: зчитує "сирий" 16-бітний регістр INA3221 по I2C.
 // ================================================================
 int16_t ina3221ReadRegister(uint8_t reg) {
+  // ⚠️ НЕ endTransmission(false) (repeated start) - на Arduino-ESP32 після
+  // першого такого читання шина "залипає" і всі наступні падають з
+  // i2cWriteReadNonStop Error -1. STOP між записом і читанням стабільний.
   Wire.beginTransmission(INA3221_ADDR);
   Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) {
+  if (Wire.endTransmission(true) != 0) {
     ina3221Found = false;
     return 0;
   }
