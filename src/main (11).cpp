@@ -25,6 +25,19 @@
   фізичну відповідність GPIO -> канал реле (тест почергового клацання)
   перед використанням з реальним двигуном під напругою.
 
+  Датчик струму INA3221 (I2C, канал 1 - струм мотора):
+    VCC  -> 3.3V (ESP32)
+    GND  -> спільний GND
+    SDA  -> GPIO21 (ESP32)
+    SCL  -> GPIO22 (ESP32)
+    IN1- -> "-" клема мотора
+    IN1+ -> спільний GND (те, куди раніше йшов мінус мотора напряму)
+  Якщо показання струму вийдуть від'ємні - поміняти місцями IN1+/IN1-.
+  Адреса на шині - 0x40 (типова, всі адресні піни на GND); якщо модуль
+  на платі підписаний інакше - поправити INA3221_ADDR. Опір шунта
+  за замовчуванням 0.1 Ом (INA3221_SHUNT_OHM) - звір з підписом на
+  своєму модулі, якщо значення інше.
+
   ----------------------------------------------------------------
   АЛГОРИТМ
   ----------------------------------------------------------------
@@ -45,6 +58,16 @@
 */
 
 #include <Arduino.h>
+#include <Wire.h>
+
+// ------------------- ДАТЧИК СТРУМУ INA3221 (I2C) -------------------
+// Пряме читання регістрів, без зовнішньої бібліотеки.
+// Канал 1 - струм мотора (IN1- на "-" мотора, IN1+ на спільний GND).
+const int  PIN_I2C_SDA        = 21;
+const int  PIN_I2C_SCL        = 22;
+const uint8_t INA3221_ADDR    = 0x40;   // типова адреса, якщо всі адресні піни на GND
+const float INA3221_SHUNT_OHM = 0.1;    // типовий шунт на платі - звір з підписом на своєму модулі
+bool ina3221Found = false;
 
 // ------------------- ПІНИ -------------------
 const int PIN_OPTOCOUPLER   = 33;   // Оптопара - детектор напруги 12В (LOW = є напруга)
@@ -107,6 +130,53 @@ const unsigned long PRINT_INTERVAL = 1000;   // раз на секунду
 // ------------------- ПРОТОТИПИ -------------------
 bool isVoltagePresent();
 bool isLimitOpen();
+int16_t ina3221ReadRegister(uint8_t reg);
+float ina3221GetShuntVoltage_mV(uint8_t channel);
+float ina3221GetCurrent_mA(uint8_t channel);
+
+
+// ================================================================
+// ФУНКЦІЯ: ina3221ReadRegister()
+// Призначення: зчитує "сирий" 16-бітний регістр INA3221 по I2C.
+// ================================================================
+int16_t ina3221ReadRegister(uint8_t reg) {
+  Wire.beginTransmission(INA3221_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    ina3221Found = false;
+    return 0;
+  }
+  Wire.requestFrom((int)INA3221_ADDR, 2);
+  if (Wire.available() < 2) {
+    ina3221Found = false;
+    return 0;
+  }
+  uint16_t hi = Wire.read();
+  uint16_t lo = Wire.read();
+  ina3221Found = true;
+  return (int16_t)((hi << 8) | lo);
+}
+
+
+// ================================================================
+// ФУНКЦІЯ: ina3221GetShuntVoltage_mV()
+// Призначення: напруга на шунті каналу (1..3), мВ. LSB = 40 мкВ.
+// ================================================================
+float ina3221GetShuntVoltage_mV(uint8_t channel) {
+  uint8_t reg = 0x01 + (channel - 1) * 2;   // 0x01, 0x03, 0x05 для каналів 1, 2, 3
+  int16_t raw = ina3221ReadRegister(reg);
+  raw >>= 3;   // значення 13-бітне, зсунуте вліво в регістрі
+  return raw * 0.04f;
+}
+
+
+// ================================================================
+// ФУНКЦІЯ: ina3221GetCurrent_mA()
+// Призначення: струм через канал (1..3), мА - з напруги на шунті й опору.
+// ================================================================
+float ina3221GetCurrent_mA(uint8_t channel) {
+  return ina3221GetShuntVoltage_mV(channel) / INA3221_SHUNT_OHM;
+}
 
 
 // ================================================================
@@ -183,6 +253,12 @@ void setup() {
 
   pinMode(PIN_LIMIT_SWITCH, INPUT_PULLUP);
   pinMode(PIN_OPTOCOUPLER, INPUT_PULLUP);  // GPIO33 підтримує внутрішній pull-up
+
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  ina3221ReadRegister(0x01);   // пробне зчитування - виставить ina3221Found
+  Serial.println(ina3221Found
+    ? "Датчик струму INA3221 відповідає на I2C."
+    : "УВАГА: датчик струму INA3221 не відповідає на I2C (адреса 0x40) - перевір підключення.");
 
   Serial.println("Система готова.");
   Serial.println("---------------------------------------------");
@@ -270,6 +346,15 @@ void loop() {
     Serial.print("  Реле2: ");
     Serial.print(relay2Was ? "1" : "0");
     Serial.print("  Реле3(гальмо): ");
-    Serial.println(relay3Was ? "1" : "0");
+    Serial.print(relay3Was ? "1" : "0");
+
+    float motorCurrentMa = ina3221GetCurrent_mA(1);
+    Serial.print("  Струм мотора: ");
+    if (ina3221Found) {
+      Serial.print(motorCurrentMa, 1);
+      Serial.println(" мА");
+    } else {
+      Serial.println("н/д (датчик не відповідає)");
+    }
   }
 }
