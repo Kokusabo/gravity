@@ -171,12 +171,22 @@ int16_t ina3221ReadRegister(uint8_t reg) {
 // ================================================================
 // ФУНКЦІЯ: ina3221GetShuntVoltage_mV()
 // Призначення: напруга на шунті каналу (1..3), мВ. LSB = 40 мкВ.
+//              Усереднення 5 відліків поспіль - поодинокий відлік може
+//              зловити шумовий викид саме в момент клацання реле
+//              (комунікація при цьому справна, шум - в самому вимірі).
 // ================================================================
 float ina3221GetShuntVoltage_mV(uint8_t channel) {
   uint8_t reg = 0x01 + (channel - 1) * 2;   // 0x01, 0x03, 0x05 для каналів 1, 2, 3
-  int16_t raw = ina3221ReadRegister(reg);
-  raw >>= 3;   // значення 13-бітне, зсунуте вліво в регістрі
-  return raw * 0.04f;
+
+  const int SAMPLE_COUNT = 5;
+  long sumRaw = 0;
+  for (int i = 0; i < SAMPLE_COUNT; i++) {
+    int16_t raw = ina3221ReadRegister(reg);
+    raw >>= 3;   // значення 13-бітне, зсунуте вліво в регістрі
+    sumRaw += raw;
+  }
+
+  return (sumRaw / (float)SAMPLE_COUNT) * 0.04f;
 }
 
 
