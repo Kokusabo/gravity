@@ -163,7 +163,7 @@ const float ENERGY_NEAR_ZERO_MA = 20.0;
 const unsigned long ENERGY_NEAR_ZERO_CONFIRM_MS = 1000;
 
 // Як часто інтегрувати потужність у енергію.
-const unsigned long ENERGY_SAMPLE_INTERVAL_MS = 200;
+const unsigned long ENERGY_SAMPLE_INTERVAL_MS = 100;
 
 enum EnergyPhase {
   ENERGY_WAIT_LIFT,    // чекаємо, поки з'явиться 12В і почнеться підйом

@@ -87,7 +87,7 @@ IN1+   -> спільний GND (те, куди раніше йшов мінус 
 const float SYSTEM_VOLTAGE_V = 12.0;          // номінальна напруга для P=V*I
 const float ENERGY_NEAR_ZERO_MA = 20.0;       // поріг "струм ≈ 0" (шум датчика)
 const unsigned long ENERGY_NEAR_ZERO_CONFIRM_MS = 1000;
-const unsigned long ENERGY_SAMPLE_INTERVAL_MS = 200;  // крок інтегрування
+const unsigned long ENERGY_SAMPLE_INTERVAL_MS = 100;  // крок інтегрування
 ```
 
 ⚠️ Потужність рахується як `SYSTEM_VOLTAGE_V * струм`, а не за реальною
