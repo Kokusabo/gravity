@@ -140,6 +140,44 @@ unsigned long lastRelay3SwitchTime = 0;
 unsigned long lastPrintTime = 0;
 const unsigned long PRINT_INTERVAL = 1000;   // раз на секунду
 
+// ------------------- ВИМІР ЕНЕРГІЇ ЦИКЛУ ПІДЙОМ/ОПУСКАННЯ -------------------
+// Разовий вимір: з'явилось 12В -> двигун піднімає вантаж (рахуємо спожиту
+// енергію), 12В зникло -> вантаж опускається і генерує (рахуємо згенеровану
+// енергію), струм впав майже до нуля -> друк підсумку і зупинка loop().
+//
+// Потужність = SYSTEM_VOLTAGE_V * струм. Напругу на самому моторі INA3221
+// не міряє (IN1+/IN1- тут обидва по "мінусовій" стороні кола, не на клемах
+// мотора) - тому береться номінальна напруга мережі/ЛБЖ. Якщо тестуєш не
+// на 12В (як раніше, з лампочкою на 1-2В) - постав реальну напругу сюди
+// перед запуском для точного результату.
+const float SYSTEM_VOLTAGE_V = 12.0;
+
+// Поріг "струм практично нульовий" - навіть при фактичному нулі датчик
+// показує невелике ненульове значення (шум/офсет АЦП шунта). Підбери
+// емпірично за спостереженням струму у стані спокою, якщо 20 мА замало
+// чи забагато.
+const float ENERGY_NEAR_ZERO_MA = 20.0;
+
+// Струм має триматись нижче порогу стабільно стільки, перш ніж опускання
+// вважається завершеним - захист від короткочасного провалу струму.
+const unsigned long ENERGY_NEAR_ZERO_CONFIRM_MS = 1000;
+
+// Як часто інтегрувати потужність у енергію.
+const unsigned long ENERGY_SAMPLE_INTERVAL_MS = 200;
+
+enum EnergyPhase {
+  ENERGY_WAIT_LIFT,    // чекаємо, поки з'явиться 12В і почнеться підйом
+  ENERGY_LIFTING,      // 12В є - рахуємо спожиту енергію
+  ENERGY_DESCENDING,   // 12В зникло - рахуємо згенеровану енергію
+  ENERGY_DONE          // вимір завершено, головний цикл зупинено
+};
+EnergyPhase energyPhase = ENERGY_WAIT_LIFT;
+double energyConsumed_J  = 0.0;   // Дж, витрачено на підйом
+double energyGenerated_J = 0.0;   // Дж, згенеровано при опусканні
+unsigned long lastEnergySampleTime = 0;
+bool nearZeroPending = false;
+unsigned long nearZeroSince = 0;
+
 // ------------------- ПРОТОТИПИ -------------------
 bool isVoltagePresent();
 bool isLimitOpen();
@@ -406,6 +444,72 @@ void loop() {
       : ">> РЕЛЕ 3 (гальмо): ВИМКНЕНО");
   }
 
+  // ---- Вимір енергії циклу підйом/опускання ----
+  if (energyPhase == ENERGY_WAIT_LIFT && voltagePresent) {
+    energyPhase = ENERGY_LIFTING;
+    lastEnergySampleTime = currentTime;
+    Serial.println(">> Підйом розпочався - рахуємо спожиту енергію...");
+  } else if (energyPhase == ENERGY_LIFTING && !voltagePresent) {
+    energyPhase = ENERGY_DESCENDING;
+    lastEnergySampleTime = currentTime;
+    nearZeroPending = false;
+    Serial.println(">> 12В зникло, вантаж опускається - рахуємо згенеровану енергію...");
+  }
+
+  if ((energyPhase == ENERGY_LIFTING || energyPhase == ENERGY_DESCENDING) &&
+      currentTime - lastEnergySampleTime >= ENERGY_SAMPLE_INTERVAL_MS) {
+    float dt_s = (currentTime - lastEnergySampleTime) / 1000.0f;
+    lastEnergySampleTime = currentTime;
+
+    i2cReinit();
+    float current_mA = ina3221GetCurrent_mA(1);
+    float absCurrent_mA = abs(current_mA);
+    float power_W = SYSTEM_VOLTAGE_V * (absCurrent_mA / 1000.0f);
+
+    if (energyPhase == ENERGY_LIFTING) {
+      energyConsumed_J += power_W * dt_s;
+    } else {   // ENERGY_DESCENDING
+      energyGenerated_J += power_W * dt_s;
+
+      if (absCurrent_mA < ENERGY_NEAR_ZERO_MA) {
+        if (!nearZeroPending) {
+          nearZeroPending = true;
+          nearZeroSince = currentTime;
+        } else if (currentTime - nearZeroSince >= ENERGY_NEAR_ZERO_CONFIRM_MS) {
+          energyPhase = ENERGY_DONE;
+        }
+      } else {
+        nearZeroPending = false;
+      }
+    }
+  }
+
+  if (energyPhase == ENERGY_DONE) {
+    // Безпечно вимкнути все перед зупинкою.
+    digitalWrite(PIN_RELAY_1_MOTOR, RELAY_1_ON_LEVEL == HIGH ? LOW : HIGH);
+    digitalWrite(PIN_RELAY_2_LOAD,  RELAY_2_ON_LEVEL == HIGH ? LOW : HIGH);
+    digitalWrite(PIN_RELAY_3_BRAKE, RELAY_3_ON_LEVEL == HIGH ? LOW : HIGH);
+
+    Serial.println("===============================================");
+    Serial.print("Енергія, витрачена на підйом:    ");
+    Serial.print(energyConsumed_J, 2);
+    Serial.println(" Дж");
+    Serial.print("Енергія, згенерована при спуску: ");
+    Serial.print(energyGenerated_J, 2);
+    Serial.println(" Дж");
+    if (energyConsumed_J > 0.0) {
+      Serial.print("ККД циклу (генерація/споживання): ");
+      Serial.print(100.0 * energyGenerated_J / energyConsumed_J, 1);
+      Serial.println(" %");
+    }
+    Serial.println("===============================================");
+    Serial.println("Вимір завершено. Головний цикл зупинено (потрібен ресет плати для нового циклу).");
+
+    while (true) {
+      delay(1000);   // навмисна зупинка назавжди
+    }
+  }
+
   // ---- Діагностичний вивід раз на секунду ----
   if (currentTime - lastPrintTime >= PRINT_INTERVAL) {
     lastPrintTime = currentTime;
@@ -430,9 +534,15 @@ void loop() {
     Serial.print("  Струм мотора: ");
     if (ina3221Found) {
       Serial.print(motorCurrentMa, 1);
-      Serial.println(" мА");
+      Serial.print(" мА");
     } else {
-      Serial.println("н/д (датчик не відповідає)");
+      Serial.print("н/д (датчик не відповідає)");
     }
+
+    Serial.print("  Енергія підйому: ");
+    Serial.print(energyConsumed_J, 2);
+    Serial.print(" Дж  Енергія спуску: ");
+    Serial.print(energyGenerated_J, 2);
+    Serial.println(" Дж");
   }
 }
